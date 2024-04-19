@@ -1,4 +1,4 @@
-# Guidance Title (required)
+# Guidance for Handling Sudden Traffic Spikes using Aurora mixed configuration architecture on AWS
 
 The Guidance title should be consistent with the title established first in Alchemy.
 
