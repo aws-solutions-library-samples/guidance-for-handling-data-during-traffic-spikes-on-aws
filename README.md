@@ -1,213 +1,227 @@
 # Guidance for Handling Sudden Traffic Spikes using Aurora mixed configuration architecture on AWS
 
-The Guidance title should be consistent with the title established first in Alchemy.
+## Table of Contents
 
-**Example:** *Guidance for Product Substitutions on AWS*
-
-This title correlates exactly to the Guidance it’s linked to, including its corresponding sample code repository. 
-
-
-## Table of Content (required)
-
-List the top-level sections of the README template, along with a hyperlink to the specific section.
-
-### Required
-
-1. [Overview](#overview-required)
+1. [Overview](#overview)
     - [Cost](#cost)
-2. [Prerequisites](#prerequisites-required)
-    - [Operating System](#operating-system-required)
-3. [Deployment Steps](#deployment-steps-required)
-4. [Deployment Validation](#deployment-validation-required)
-5. [Running the Guidance](#running-the-guidance-required)
-6. [Next Steps](#next-steps-required)
-7. [Cleanup](#cleanup-required)
+2. [Prerequisites](#prerequisites)
+3. [Deployment Steps](#deployment-steps)
+4. [Deployment Validation](#deployment-validation)
+5. [Running the Guidance](#running-the-guidance)
+6. [Next Steps](#next-steps)
+7. [Cleanup](#cleanup)
 
-***Optional***
+## Overview
 
-8. [FAQ, known issues, additional considerations, and limitations](#faq-known-issues-additional-considerations-and-limitations-optional)
-9. [Revisions](#revisions-optional)
-10. [Notices](#notices-optional)
-11. [Authors](#authors-optional)
+Businesses often experience unexpected traffic spikes due to marketing events, new product launches, and more. During such periods, a rapid increase in database load can lead to query delays, connection limit exhaustion, transaction failures, and ultimately, service degradation and outages, which can severely impact a company's credibility and revenue.
 
-## Overview (required)
+Traditional database auto-scaling provisions additional instances during load surges, but the provisioning process takes time, making it challenging to respond in real-time to sudden traffic changes. Moreover, accurate traffic forecasting is difficult, often resulting in unnecessary over-provisioning.
 
-1. Provide a brief overview explaining the what, why, or how of your Guidance. You can answer any one of the following to help you write this:
+To address these challenges, this guide introduces an Amazon Aurora Mixed-Configuration Cluster architecture that combines a provisioned Amazon Aurora cluster with Aurora Serverless v2 (ASV2) instances, along with a custom auto-scaling solution based on high-resolution metrics. During normal operations, traffic is served by the provisioned cluster. When load surges, some (or all) traffic is automatically routed to ASV2 instances. Simultaneously, additional read replicas are automatically added to the provisioned cluster to handle prolonged traffic spikes. As the load decreases, only the minimum required ASV2 capacity is maintained, minimizing costs. Furthermore, ASV2 instances can be utilized for various purposes like analytics, batch jobs, etc., offloading workloads from the operational service.
 
-    - **Why did you build this Guidance?**
-    - **What problem does this Guidance solve?**
+This architecture enables a real-time response to unpredictable traffic fluctuations, preventing database overload and ensuring service continuity. Dynamic resource allocation prevents database overload, service disruptions, and unnecessary over-provisioning, thereby optimizing cost-efficiency.
 
-2. Include the architecture diagram image, as well as the steps explaining the high-level overview and flow of the architecture. 
-    - To add a screenshot, create an ‘assets/images’ folder in your repository and upload your screenshot to it. Then, using the relative file path, add it to your README. 
+## Architecture
 
-### Cost ( required )
+![AMCC Architecture](./assets/images/Amcc-Architecture.png)
 
-This section is for a high-level cost estimate. Think of a likely straightforward scenario with reasonable assumptions based on the problem the Guidance is trying to solve. If applicable, provide an in-depth cost breakdown table in this section.
+The Amazon Aurora Mixed-Configuration Cluster with Custom Auto Scaling system architecture proposed in this guide consists of the following key steps:
 
-Start this section with the following boilerplate text:
+1. **Configure Amazon Aurora Mixed-Configuration Cluster**
+   - Add Aurora Serverless v2 (ASV2) read-replica instances to an existing provisioned Amazon Aurora cluster
+   - Configure custom endpoints
+   - Enable Amazon RDS Enhanced Monitoring
 
-_You are responsible for the cost of the AWS services used while running this Guidance. As of <month> <year>, the cost for running this Guidance with the default settings in the <Default AWS Region (Most likely will be US East (N. Virginia)) > is approximately $<n.nn> per month for processing ( <nnnnn> records )._
+2. **Configure Amazon Route 53 Weighted Record Set**
+   - Set up a Private Hosted Zone
+   - Create weighted record sets for custom endpoints
 
-Replace this amount with the approximate cost for running your Guidance in the default Region. This estimate should be per month and for processing/serving resonable number of requests/entities.
+3. **Use Amazon CloudWatch Logs Subscription Filter and AWS Lambda**
+   - Extract CPU utilization metrics from provisioned read-replica instances
 
-Suggest you keep this boilerplate text:
-_We recommend creating a [Budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) through [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/) to help manage costs. Prices are subject to change. For full details, refer to the pricing webpage for each AWS service used in this Guidance._
+4. **Create Real-time Custom Metrics using Embedded Metric Format**
 
-### Sample Cost Table ( required )
+5. **Set Amazon CloudWatch Alarms on Custom Metrics**
 
-The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the US East (N. Virginia) Region for one month.
+6. **Trigger AWS Step Functions on Alarm**
+   - Adjust Amazon Route 53 record weights and continuously monitor
+   - Set ASV2 endpoint weight to 0 to block traffic during low load
+   - Dynamically adjust ASV2 weights as needed
+
+7. **Configure Aurora Custom Auto Scaling**
+   - Use AWS Auto Scaling APIs to auto-scale the Amazon Aurora cluster
+   - On scale-out: Add provisioned read replicas
+   - On scale-in: Remove provisioned read replicas
+
+## Cost
+
+You will need to pay for the AWS services used while running this guidance.
+
+For cost management, we recommend creating a budget through AWS Cost Explorer. Prices are subject to change. For more details, refer to the pricing pages for each AWS service used in this guidance.
+
+1. **AWS Lambda**
+    - Memory allocation: 128MB
+    - Price: $0.0000002083 per 1 million requests (Seoul region)
+    <!-- - Monthly execution count if executed every second: 2,592,000 -->
+    <!-- - Monthly cost: 2,592,000 executions * $0.0000002083/1 million requests = $0.0054 -->
+
+2. **Amazon Aurora Serverless v2**
+    - ACU price: $0.015/hour for an average usage of 1 ACU (Seoul region)
+    - Price during spike periods with a maximum of 64 ACUs: approximately $0.96/hour (Seoul region)
+    <!-- - Monthly cost during normal periods: $0.015 * 720 hours = $10.8
+    - Monthly cost during spike periods: $0.96 * 24 hours * 4 weeks = $92.16 (assuming spike periods occur once a week for 24 hours) -->
+
+3. **Amazon CloudWatch Logs**
+    - Price: $0.05/GB (Seoul region)
+    - Assumption: 1GB/month of log data generated
+    <!-- - Monthly cost: $0.05 -->
+
+4. **Amazon Route 53**
+    - Weighted routing policy
+    - Price: $0.40 per 1 million queries (Seoul region)
+    <!-- - Assumption: Approximately 100 million queries/month
+    - Monthly cost: $40 -->
+
+**Total monthly estimated cost for all services**<br>
+The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the Asia Pacific (Seoul) Region for one month.
 
 | AWS service  | Dimensions | Cost [USD] |
 | ----------- | ------------ | ------------ |
-| Amazon API Gateway | 1,000,000 REST API calls per month  | $ 3.50month |
-| Amazon Cognito | 1,000 active users per month without advanced security feature | $ 0.00 |
+| AWS Lambda | Monthly 2,592,000 executions | $ 0.0054/month |
+| Amazon Aurora Serverless v2 | Monthly during normal periods: 720 hours (1 ACUs) | $ 146.0/month |
+| Amazon Aurora Serverless v2 | Monthly during spike periods: 96 hours (64 ACUs) | $ 19.2/month |
+| Amazon CloudWatch Logs | 1GB/month of log data generated | $ 0.05/month |
+| Amazon Route 53 | 1 million queries | $ 0.40/month |
+| Amazon Route 53 | 1 million queries | $ 0.40/month |
 
-## Prerequisites (required)
+- Total: $ 146.0 + $19.2 + $0.05 + $0.40 = $ 165.65 / month
 
-### Operating System (required)
+Note: **This amount is an estimate and does not include the cost of provisioned instances**. The actual cost may vary depending on your usage and provisioned services.
 
-- Talk about the base Operating System (OS) and environment that can be used to run or deploy this Guidance, such as *Mac, Linux, or Windows*. Include all installable packages or modules required for the deployment. 
-- By default, assume Amazon Linux 2/Amazon Linux 2023 AMI as the base environment. All packages that are not available by default in AMI must be listed out.  Include the specific version number of the package or module.
+## prerequisites
 
-**Example:**
-“These deployment instructions are optimized to best work on **<Amazon Linux 2 AMI>**.  Deployment in another OS may require additional steps.”
+1. Ensure that `AWSCloudFormationStackSetAdministrationRole` role, and `AWSCloudFormationStackSetExecutionRole` role are created in the primary region where the Amazon Aurora database cluster resides. For more information, see [Grant self-managed permissions](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs-self-managed.html).
 
-- Include install commands for packages, if applicable.
+2. Install and configure the latest version of the [AWS CLI (2.2.37 or newer)](https://aws.amazon.com/cli/) and Python 3.10 on the machine you are going to use to interact with the solution. This can be your personal laptop, an EC2 instance, Cloud9, or a similar machine. Set up the AWS credentials for the user who is authenticated to set up the stacks in the Primary region.
 
+## Deployment Steps
 
-### Third-party tools (If applicable)
 
-*List any installable third-party tools required for deployment.*
+#### 1. Clone the repository
 
+```
+git clone https://github.com/aws-solutions-library-samples/guidance-for-handling-sudden-traffic-spikes-in-amazon-aurora-using-aurora-mixed-configuration-on-aws
+cd ./guidance-for-handling-sudden-traffic-spikes-in-amazon-aurora-using-aurora-mixed-configuration-on-aws
+```
 
-### AWS account requirements (If applicable)
+#### 2. Create the AWS CloudFormation stacks in the Primary Region A
+This guidance utilizes the `AdministratorAccess` role for deployment. For use in a production environment, refer to the [security best practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html) in the AWS Identity and Access Management (IAM) documentation and modify the IAM roles, Amazon Aurora, and other services used as needed.
 
-*List out pre-requisites required on the AWS account if applicable, this includes enabling AWS regions, requiring ACM certificate.*
+* Using the AWS Management Console
 
-**Example:** “This deployment requires you have public ACM certificate available in your AWS account”
+    * Sign in to the AWS CloudFormation console
+    * Create Stack > Upload the `./source/templates/Amcc-Stack.yaml` file
+    * Deploy the stack after entering `Amcc-Stack` in the stack name
+        * The parameters can be changed, but we recommend the default values for a smooth deployment.
 
-**Example resources:**
-- ACM certificate 
-- DNS record
-- S3 bucket
-- VPC
-- IAM role with specific permissions
-- Enabling a Region or service etc.
+* Using Script
+    ```
+    source ./deployment/deploy.sh
+    ```
 
+## Deployment Validation
 
-### aws cdk bootstrap (if sample code has aws-cdk)
+Open the AWS CloudFormation console and verify the status of the template with the name starting with `Amcc-Stack`.
 
-<If using aws-cdk, include steps for account bootstrap for new cdk users.>
+Deploying this stack automatically configures the following environments:
 
-**Example blurb:** “This Guidance uses aws-cdk. If you are using aws-cdk for first time, please perform the below bootstrapping....”
+- **VPC, subnet, internet gateway, NAT gateway:** A VPC with public and private subnets, an internet gateway for public access, and a NAT gateway for internet access for private instances.
 
-### Service limits  (if applicable)
+- **Amazon Aurora Mixed-Configuration MySQL cluster:** An Amazon Aurora MySQL cluster consisting of a provisioned writer instance, a provisioned reader instance, and an Aurora Serverless v2 instance.
 
-<Talk about any critical service limits that affect the regular functioning of the Guidance. If the Guidance requires service limit increase, include the service name, limit name and link to the service quotas page.>
+- **Aurora custom endpoints:** Custom endpoints for the provisioned reader and serverless reader instances.
 
-### Supported Regions (if applicable)
+- **Amazon Route 53 Private Hosted Zones:** A private hosted zone with weight-based records for traffic balancing.
 
-<If the Guidance is built for specific AWS Regions, or if the services used in the Guidance do not support all Regions, please specify the Region this Guidance is best suited for>
+- **AWS Lambda functions:** Lambda functions for collecting custom Amazon CloudWatch metrics, increasing and decreasing Amazon Route 53 weights, and creating custom scaling policies.
 
+- **AWS Step Functions:** Step Functions for traffic balancing and reclaiming based on Amazon CloudWatch alerts.
 
-## Deployment Steps (required)
+- **Amazon CloudWatch alerts and Amazon EventBridge rules:** Amazon CloudWatch alerts to monitor CPU usage and Amazon EventBridge rules to trigger the AWS Step Functions state machine.
 
-Deployment steps must be numbered, comprehensive, and usable to customers at any level of AWS expertise. The steps must include the precise commands to run, and describe the action it performs.
+- **You can see the detailed output in the AWS CloudFormation `Amcc-Stack` stack Resources.**
 
-* All steps must be numbered.
-* If the step requires manual actions from the AWS console, include a screenshot if possible.
-* The steps must start with the following command to clone the repo. ```git clone xxxxxxx```
-* If applicable, provide instructions to create the Python virtual environment, and installing the packages using ```requirement.txt```.
-* If applicable, provide instructions to capture the deployed resource ARN or ID using the CLI command (recommended), or console action.
+    ```
+    aws cloudformation describe-stacks --stack-name amcc-guidance --query 'Stacks[0].Outputs' --output table --no-cli-pager
+    ```
 
- 
-**Example:**
+## Running the Guidance
 
-1. Clone the repo using command ```git clone xxxxxxxxxx```
-2. cd to the repo folder ```cd <repo-name>```
-3. Install packages in requirements using command ```pip install requirement.txt```
-4. Edit content of **file-name** and replace **s3-bucket** with the bucket name in your account.
-5. Run this command to deploy the stack ```cdk deploy``` 
-6. Capture the domain name created by running this CLI command ```aws apigateway ............```
+#### The deployed guidelines work with the CPU criteria shown in the figure below.
+![HowGuidanceWorks](./assets/images/HowGuidanceWorks.png)
 
 
+If you're using a separate load testing tool, you can generate **read traffic** load on the `read.amcc-rds.com` endpoint. If your Java application uses a connection pool, we recommend using the latest [AWS JDBC driver for MySQL](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Connecting.html#Aurora.Connecting.JDBCDriverMySQL). This driver can be used as a drop-in replacement for the MySQL Connector/J driver. It has a built-in mechanism that ensures the cluster endpoint always maps to the writer instance in the cluster.
 
-## Deployment Validation  (required)
+To allow your Java application to quickly remap traffic during sudden spikes of load, you can adjust the [DNS TTL (Time to Live)](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.BestPractices.html) setting. To set the DNS TTL globally for all Java apps running on the host, you can edit the `$JAVA_HOME/jre/lib/security/java.security` file and set the following property:
+```
+networkaddress.cache.ttl=0
+```
+You can also set the DNS TTL in your Java code:
+```
+java.security.Security.setProperty("networkaddress.cache.ttl", "0")
+```
+#### **Since this guidance does not include a load testing tool, we will proceed by adjusting the alarm thresholds.**
 
-<Provide steps to validate a successful deployment, such as terminal output, verifying that the resource is created, status of the CloudFormation template, etc.>
+#### 1. Adjusting Traffic Distribution Alarm
 
+The logic for traffic distribution based on Amazon CloudWatch custom metrics works as follows: <br>
+Traffic Distribution Alarm (Default Threshold: 60%) -> Amazon EventBridge -> Invokes AWS Step Functions (runs AWS Lambda) -> Increases Amazon Route 53 serverless record weights
 
-**Examples:**
+- To experiment, access the AWS console and navigate to the Amazon CloudWatch service's alarms.
+- Edit the `TrafficReclaimAlarmsArn` and adjust the Threshold value to 10.
+- After a short while (10 seconds), an alert will be triggered, and Amazon EventBridge will invoke AWS Step Functions.
+- As AWS Step Functions execute, the weight starts with an `incresing of 4 every 30 seconds` and finally `increases to 20 (MAX_WEIGHT)`.
 
-* Open CloudFormation console and verify the status of the template with the name starting with xxxxxx.
-* If deployment is successful, you should see an active database instance with the name starting with <xxxxx> in        the RDS console.
-*  Run the following CLI command to validate the deployment: ```aws cloudformation describe xxxxxxxxxxxxx```
+#### 2. Adjusting Traffic Reclaim Alarm
+The logic for traffic distribution based on Amazon CloudWatch custom metrics works as follows:<br>
+Traffic Reclaim Alarm (Default Threshold: 50%) -> Amazon EventBridge -> Invokes AWS Step Functions (runs AWS Lambda) -> Adjusts Amazon Route 53 record weights
 
-
-
-## Running the Guidance (required)
-
-<Provide instructions to run the Guidance with the sample data or input provided, and interpret the output received.> 
-
-This section should include:
-
-* Guidance inputs
-* Commands to run
-* Expected output (provide screenshot if possible)
-* Output description
-
-
-
-## Next Steps (required)
-
-Provide suggestions and recommendations about how customers can modify the parameters and the components of the Guidance to further enhance it according to their requirements.
-
-
-## Cleanup (required)
-
-- Include detailed instructions, commands, and console actions to delete the deployed Guidance.
-- If the Guidance requires manual deletion of resources, such as the content of an S3 bucket, please specify.
-
-
-
-## FAQ, known issues, additional considerations, and limitations (optional)
-
-
-**Known issues (optional)**
-
-<If there are common known issues, or errors that can occur during the Guidance deployment, describe the issue and resolution steps here>
-
-
-**Additional considerations (if applicable)**
-
-<Include considerations the customer must know while using the Guidance, such as anti-patterns, or billing considerations.>
-
-**Examples:**
-
-- “This Guidance creates a public AWS bucket required for the use-case.”
-- “This Guidance created an Amazon SageMaker notebook that is billed per hour irrespective of usage.”
-- “This Guidance creates unauthenticated public API endpoints.”
-
-
-Provide a link to the *GitHub issues page* for users to provide feedback.
-
-
-**Example:** *“For any feedback, questions, or suggestions, please use the issues tab under this repo.”*
-
-## Revisions (optional)
-
-Document all notable changes to this project.
-
-Consider formatting this section based on Keep a Changelog, and adhering to Semantic Versioning.
-
-## Notices (optional)
-
-Include a legal disclaimer
-
-**Example:**
-*Customers are responsible for making their own independent assessment of the information in this Guidance. This Guidance: (a) is for informational purposes only, (b) represents AWS current product offerings and practices, which are subject to change without notice, and (c) does not create any commitments or assurances from AWS and its affiliates, suppliers or licensors. AWS products or services are provided “as is” without warranties, representations, or conditions of any kind, whether express or implied. AWS responsibilities and liabilities to its customers are controlled by AWS agreements, and this Guidance is not part of, nor does it modify, any agreement between AWS and its customers.*
-
-
-## Authors (optional)
-
-Name of code contributors
+- To experiment, access the AWS console and navigate to the Amazon CloudWatch service's alarms.
+- Edit the `TrafficReclaimAlarmsArn` and adjust the Threshold value to 10.
+- After a short while (10 seconds) the alarm changes to normal.
+- Again, adjust the alarm's Threshold value to 50. after a short while (10 seconds) an alert will be triggered, and Amazon EventBridge will invoke AWS Step Functions.
+- As AWS Step Functions execute, the weight starts `decreasing by 4 every 60 seconds` and finally `decreases to 0 (MIN_WEIGHT)`.
+
+#### 3. Adjusting Custom Auto Scaling for Provisioned Instance Scaling
+- Custom auto scaling cannot be controlled from the console. Therefore, you can modify it through the deployed AWS Lambda function or AWS Lambda function code using the CLI.
+- Navigate to the `Control-AuroraCustomScaling` Lambda function and adjust the `TARGET_VALUE` (default 40) to 10 in the `Environment Variables` value.
+- After approximately 3 minutes, you will be able to observe an increase in provisioned instances.
+
+## Next Steps
+> **The infrastructure and services set up in this guide are intended for learning purposes and are not designed for production environments. You should carefully review and modify the configurations to meet the requirements of your production workloads before deploying to a production environment.**
+
+You can customize the following values:
+
+| AWS Service | Resource Name | Description | Default Value |
+| ----------- | ------------- | ----------- | ------------- |
+| Amazon CloudWatch Alarms | `traffic-distribution-alarm` | Alarm criteria for distributing traffic to Aurora Serverless v2 instances by adjusting Amazon Route 53 weights | `Threshold`: 60% |
+| Amazon CloudWatch Alarms | `traffic-reclaim-alarm` | Alarm criteria for reclaiming traffic from Aurora Serverless v2 instances by adjusting Amazon Route 53 weights | `Threshold`: 50% |
+| AWS Lambda | `IncreaseRoute53Weights` | Criteria for adjusting Amazon Route 53 serverless record weights (refer to environment variables) | `MIN_WEIGHT`: 0 <br> `MAX_WEIGHT`: 20 <br> `STEP_SIZE`: 4 |
+| AWS Lambda | `DecreaseRoute53Weights` | Criteria for adjusting Amazon Route 53 serverless record weights (refer to environment variables) | `MIN_WEIGHT`: 0 <br> `MAX_WEIGHT`: 20 <br> `STEP_SIZE`: 4 |
+| AWS Step Functions | `SF-TrafficDistribution` | `DecreaseRoute53Weights` AWS Lambda Function Orchestration  | `"Waiting Reflection"."Seconds"`: 30 |
+| AWS Step Functions | `SF-TrafficReclaim` | `IncreaseRoute53Weights` AWS Lambda Function Orchestration  | `"Waiting Reflection"."Seconds"`: 60 |
+| AWS Lambda | `Control-AuroraCustomScaling` | Aurora Custom Auto Scaling criteria for scaling provisioned instances (refer to environment variables) | `TARGET_VALUE`: 40% |
+|Amazon Route 53 |`read.amcc-rds.com` <br> `PROVISIONED_RO_RECORD_IDENTIFIER`| Weights of the provisioned read instances | `Weight`: 10 |
+
+Rather than providing step-by-step instructions, it is recommended to explore and experiment with these configurations to gain a better understanding and determine the optimal settings for your specific use case.
+
+## Cleanup
+If you no longer need it, you can delete the AWS CloudFormation stack to clean up resources.
+
+```
+source ./deployment/clean.sh
+```
+
+## More information
+Related blog: [How ktown4u built a custom auto scaling architecture using an Amazon Aurora mixed-configuration cluster to respond to sudden traffic spikes](https://aws.amazon.com/ko/blogs/database/how-ktown4u-built-a-custom-auto-scaling-architecture-using-an-amazon-aurora-mixed-configuration-cluster-to-respond-to-sudden-traffic-spikes/)

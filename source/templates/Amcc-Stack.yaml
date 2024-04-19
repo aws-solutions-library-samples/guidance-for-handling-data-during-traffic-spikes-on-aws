@@ -1,0 +1,1669 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Amazon Aurora Mixed-Configuration Cluster with Custom Auto Scaling StackSet
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: vpc
+        Parameters:
+          - VpcName
+          - VpcCidr
+          - PublicSubnetACidr
+          - PrivateSubnetACidr
+          - PublicSubnetCCidr
+          - PrivateSubnetCCidr
+      - Label: 
+          default: aurora
+        Parameters:
+          - ClusterName
+          - MasterUsername
+      - Label: 
+          default: route53
+        Parameters:
+          - HostedZoneName
+      - Label:
+          default: CustomMetric
+        Parameters:
+          - MetricNamespace
+          - MetricName
+          - MetricClusterKey
+          - MetricDimensionKey
+          - MetricDimensionValue
+      - Label:
+          default: Weight environment variable 
+        Parameters:
+          - RecordName
+          - MaxWeight
+          - MinWeight
+          - StepSize
+          - DNSTtl
+
+Parameters:
+  VpcName:
+    Type: String
+    Description: Name of the VPC
+    Default: "amcc-vpc"
+  VpcCidr:
+    Type: String
+    Description: CIDR block for the VPC
+    Default: "10.0.0.0/16"
+  PublicSubnetACidr:
+    Type: String
+    Description: CIDR block for Public Subnet A
+    Default: "10.0.10.0/20"
+  PrivateSubnetACidr:
+    Type: String
+    Default: "10.0.100.0/20"
+    Description: CIDR block for Private Subnet A
+  PublicSubnetCCidr:
+    Type: String
+    Description: CIDR block for Public Subnet C
+    Default: "10.0.20.0/20"
+  PrivateSubnetCCidr:
+    Type: String
+    Description: CIDR block for Private Subnet C
+    Default: "10.0.200.0/20"
+  ClusterName:
+    Type: String
+    Description: Name of the Aurora Mysql Cluster
+    Default: "aurora-mysql-cluster"
+  ClusterUsername:
+    Type: String
+    Description: Username for the Aurora Mysql Cluster
+    Default: "Admin"
+  HostedZoneName:
+    Type: String
+    Description: Name of the private hosted zone
+    Default: amcc-rds.com
+  MetricNamespace:
+    Type: String
+    Description: Name of the Custom metric Namespace
+    Default: CustomMetricsAurora
+  MetricName:
+    Type: String
+    Description: Name of the Custom metric Name
+    Default: CPUUtilization
+  MetricClusterKey:
+    Type: String
+    Description: Name of the Custom metric ClusterKey
+    Default: ClusterName
+  MetricDimensionKey:
+    Type: String
+    Description: Name of the Custom metric DimensionKey
+    Default: InstanceType
+  MetricDimensionValue:
+    Type: String
+    Description: Name of the Custom metric DimensionValue
+    Default: provisioned
+  RecordName:
+    Type: String
+    Description: sub Domain of the Route 53 private domain
+    Default: read    
+  MaxWeight:
+    Type: Number
+    Description: Limiting the maximum set value for weights
+    Default: 20
+  MinWeight:
+    Type: Number
+    Description: Limiting the minimun set value for weights 
+    Default: 0
+  StepSize:
+    Type: Number
+    Description: How much to increase/decrease the weights 
+    Default: 4
+  DNSTtl:
+    Type: Number
+    Description: DNS TTL CHECK TIME 
+    Default: 0
+
+Resources:
+  # S3 Bucket for lambda_layer
+  AmccS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-', ['amcc-stack-bucket', !Ref 'AWS::AccountId']]
+    UpdateReplacePolicy: Retain
+
+  # CodeBuild Role
+  AmccCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccCodeBuildRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref AmccCodeBuildManagedPolicy
+
+  AmccCodeBuildManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccCodeBuildManagedPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:PutObject'
+            Resource: !Sub 'arn:aws:s3:::${AmccS3Bucket}/*'
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+  # lambda_layer bulid
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-CodeBuildProject
+      Description: CodeBuild project to package AWS Embedded Metrics Python library
+      ServiceRole: !GetAtt AmccCodeBuildRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:6.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+        - Name: BucketName
+          Value: !Ref AmccS3Bucket  
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.12
+              commands:
+                - mkdir -p python/lib/python3.12/site-packages
+                - git clone https://github.com/awslabs/aws-embedded-metrics-python.git
+                - pip3 install aws-embedded-metrics --target python/lib/python3.12/site-packages
+                - zip -r lambda_layer_emf_py312.zip python/lib/python3.12/site-packages
+            post_build:
+              commands:
+                - aws s3 cp lambda_layer_emf_py312.zip s3://$BucketName/lambda_layer_emf_py312.zip
+      TimeoutInMinutes: 10
+
+  # Lambda Role for create Lambda Layer o=n Codebuild
+  AmccLambdaLayerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccLambdaLayerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref AmccLambdaLayerManagedPolicy
+
+  AmccLambdaLayerManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccLambdaLayerManagedPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'codebuild:StartBuild'
+            Resource: !GetAtt CodeBuildProject.Arn  
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-DeployLambdaLayer"
+
+  # Lambda Function to invoke Codebuild
+  StartBuildFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DeployLambdaLayer
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt AmccLambdaLayerRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          build = boto3.client('codebuild')
+
+          def lambda_handler(event, context):
+            if event['RequestType'] == 'Create':
+              try:
+                resp = build.start_build(projectName=event['ResourceProperties']['ProjectName'])
+                build_id = resp['build']['id']
+
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                  'BuildId': build_id
+                })
+              except Exception as e:
+                cfnresponse.send(event, context, cfnresponse.FAILED, str(e))
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  # Invoke Custom Resource - Lambda-Layer
+  StartBuild:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt StartBuildFunction.Arn
+      ProjectName: !Ref CodeBuildProject
+    DependsOn:
+      - AmccS3Bucket
+      - CodeBuildProject   
+    DeletionPolicy: Retain
+
+  ## VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref VpcName
+
+  ## Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-InternetGateway"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  ## Subnets
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PublicSubnetA"
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false      
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PrivateSubnetA"
+
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PublicSubnetC"
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false      
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PrivateSubnetC"
+  
+  ## NAT
+  NatGatewayAEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NatGatewayCEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayAEIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-NatGatewayA"
+
+  NatGatewayC:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayCEIP.AllocationId
+      SubnetId: !Ref PublicSubnetC
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-NatGatewayC"
+
+  ## Routing Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PublicRouteTable"
+  
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetC
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${VpcName}-PrivateRouteTableA"
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA        
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      SubnetId: !Ref PrivateSubnetA
+
+  PrivateRouteTableC:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${VpcName}-PrivateRouteTableC"
+
+  PrivateRouteC:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableC
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayC
+
+  PrivateSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableC
+      SubnetId: !Ref PrivateSubnetC
+
+  ## AURORA CLUSTER
+  AuroraSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: amcc-aurora-subnet-group
+      DBSubnetGroupDescription: Subnet group for Aurora
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetC
+
+  AuroraClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: amcc-aurora-cluster-sg
+      GroupDescription: Security group for Aurora Mysql Cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: !Ref VpcCidr
+
+  AuroraSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-AuroraCredentials'
+      Description: Aurora Cluster User Credentials
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${ClusterUsername}"}' 
+        GenerateStringKey: password
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      AvailabilityZones:
+        - !Select [0, !GetAZs '']
+        - !Select [1, !GetAZs '']
+      Engine: aurora-mysql
+      EngineVersion: "8.0.mysql_aurora.3.04.1"
+      EngineMode: provisioned
+      DBClusterIdentifier: !Ref ClusterName
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref AuroraSecret, ':SecretString:username}}']]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref AuroraSecret, ':SecretString:password}}']]
+      VpcSecurityGroupIds:
+        - !Ref AuroraClusterSecurityGroup
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 1
+        MaxCapacity: 128
+      DeletionProtection: false
+      StorageEncrypted: true
+      BacktrackWindow: 72    
+
+  AuroraWriterInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.t3.medium
+      DBInstanceIdentifier: !Sub "${ClusterName}-writer"
+      Engine: aurora-mysql
+      MonitoringInterval: 1
+      MonitoringRoleArn: !GetAtt MonitoringRole.Arn
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  AuroraReaderInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.t3.medium
+      DBInstanceIdentifier: !Sub "${ClusterName}-reader"
+      Engine: aurora-mysql
+      MonitoringInterval: 1
+      MonitoringRoleArn: !GetAtt MonitoringRole.Arn
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      AvailabilityZone: !Select [1, !GetAZs ""]
+    DependsOn: AuroraWriterInstance
+
+  AuroraServerlessV2Instance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.serverless
+      DBInstanceIdentifier: !Sub "${ClusterName}-serverlessv2"
+      Engine: aurora-mysql
+      MonitoringInterval: 1
+      MonitoringRoleArn: !GetAtt MonitoringRole.Arn
+      PromotionTier: 15
+      DBSubnetGroupName: !Ref AuroraSubnetGroup
+      AvailabilityZone: !Select [0, !GetAZs ""]
+    DependsOn: AuroraWriterInstance
+  
+  ## Trun on Enhenced Monitoring Feature / MonitoringInterval: 1 Second
+  MonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AuroraEnhencedMonitoringRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'
+
+  ## ROUTE53 PRIVATE HOSTED ZONE
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref HostedZoneName
+      HostedZoneConfig:
+        Comment: !Sub "Private hosted zone for ${HostedZoneName}"
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Ref AWS::Region
+      HostedZoneTags:
+        - Key: Name
+          Value: !Ref HostedZoneName
+    DeletionPolicy: Delete
+
+  ## RDSOSMetricCollectorLogGroup RetentionInDays - 7Day
+  RDSOSMetricCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/RDSOSMetricCollector
+      RetentionInDays: 7
+    DeletionPolicy: Delete
+
+  ## Enroll EMF Lambda Layer 
+  LambdaLayerEmbeddedMetrics:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: embedded-metrics-lambda-layer
+      Description: Layer for the AWS Embedded Metrics Python Library
+      Content:
+        S3Bucket: !Ref AmccS3Bucket
+        S3Key: lambda_layer_emf_py312.zip
+      CompatibleRuntimes:
+        - python3.12
+    DependsOn: 
+      - AuroraWriterInstance
+      - StartBuild
+      - RDSOSMetricCollectorLogGroup
+    DeletionPolicy: Delete
+
+  ## RDSOSMetricCollector Lambda Functions Role
+  AmccLambdaRDSOSMetricCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccLambdaRDSOSMetricCollectorRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref AmccLambdaRDSOSMetricCollectorPolicy
+    DependsOn: 
+      - AuroraReaderInstance
+
+  AmccLambdaRDSOSMetricCollectorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccLambdaRDSOSMetricCollectorPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "rds:DescribeDBInstances"
+              - "rds:DescribeDBClusters"
+            Resource:
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterName}"
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/RDSOSMetricCollector*"
+          - Effect: Allow
+            Action:
+              - "logs:PutSubscriptionFilter"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:RDSOSMetrics:*"
+    DependsOn: 
+      - AuroraReaderInstance
+
+  ## Deploy Custom RDSOSMetrics Lambda
+  RDSOSMetricCollectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RDSOSMetricCollector
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt AmccLambdaRDSOSMetricCollectorRole.Arn
+      Timeout: 60
+      Layers:
+        - !Ref LambdaLayerEmbeddedMetrics      
+      Code:
+        ZipFile: !Sub |
+          import base64
+          import gzip
+          import json
+          import os
+          
+          import boto3
+          from aws_embedded_metrics import metric_scope
+          from aws_embedded_metrics.storage_resolution import StorageResolution
+          
+          REGION_NAME = os.environ['REGION_NAME']
+          CLUSTER_NAME = os.environ['CLUSTER_NAME']
+          METRIC_NAMESPACE = os.environ['METRIC_NAMESPACE']
+          METRIC_NAME = os.environ['METRIC_NAME']
+          METRIC_CLUSTER_KEY = os.environ['METRIC_CLUSTER_KEY']
+          METRIC_DIMENSION_KEY = os.environ['METRIC_DIMENSION_KEY']
+          METRIC_DIMENSION_VALUE = os.environ['METRIC_DIMENSION_VALUE']
+          
+          session = boto3.Session(region_name=REGION_NAME)
+          rds = session.client("rds")
+          available_status = ["available"]
+          
+          
+          @metric_scope
+          def lambda_handler(event, context, metrics):
+              data = event["awslogs"]["data"]
+              decoded_data = base64.b64decode(data)
+              decompressed_data = gzip.decompress(decoded_data)
+              metric = json.loads(json.loads(decompressed_data)["logEvents"][0]["message"])
+          
+              instances_with_status = rds.describe_db_instances(
+                  Filters=[{"Name": "db-cluster-id", "Values": [CLUSTER_NAME]}]
+              )["DBInstances"]
+          
+              instances_with_primary = rds.describe_db_clusters(DBClusterIdentifier=CLUSTER_NAME)[
+                  "DBClusters"
+              ][0]["DBClusterMembers"]
+          
+              instances = []
+              for i in instances_with_status:
+                  for c in instances_with_primary:
+                      if i["DBInstanceIdentifier"] == c["DBInstanceIdentifier"]:
+                          instances.append(dict(i, **c))
+                          break
+          
+              available_provisioned_read_replicas = [
+                  instance["DBInstanceIdentifier"]
+                  for instance in instances
+                  if instance["DBInstanceStatus"] in available_status
+                  and instance["DBInstanceClass"] != "db.serverless"
+                  and not instance["IsClusterWriter"]
+              ]
+          
+              if not metric["instanceID"] in available_provisioned_read_replicas:
+                  return
+          
+              metrics.set_dimensions(
+                  {METRIC_CLUSTER_KEY: CLUSTER_NAME, METRIC_DIMENSION_KEY: METRIC_DIMENSION_VALUE}
+              )
+              metrics.put_metric(
+                  METRIC_NAME,
+                  metric["cpuUtilization"]["total"],
+                  "Percent",
+                  StorageResolution.HIGH,
+              )
+              metrics.set_namespace(METRIC_NAMESPACE)
+      Environment:
+        Variables:
+          REGION_NAME: !Ref AWS::Region
+          CLUSTER_NAME: !Ref ClusterName
+          METRIC_NAMESPACE: !Ref MetricNamespace
+          METRIC_NAME: !Ref MetricName
+          METRIC_CLUSTER_KEY: !Ref MetricClusterKey
+          METRIC_DIMENSION_KEY: !Ref MetricDimensionKey
+          METRIC_DIMENSION_VALUE: !Ref MetricDimensionValue
+    DependsOn: 
+      - LambdaLayerEmbeddedMetrics
+      - AuroraReaderInstance
+      - RDSOSMetricCollectorLogGroup
+
+  ## Lambda Permmison
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RDSOSMetricCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: logs.amazonaws.com
+      SourceArn: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:RDSOSMetrics:*'
+
+  ## Cloudwatch Log Group RDSOSMetrics Subscrpition Filter
+  LambdaLogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      DestinationArn: !GetAtt RDSOSMetricCollectorFunction.Arn
+      FilterPattern: ''
+      LogGroupName: RDSOSMetrics
+
+  ## Role for Lambda Function 
+  AmccLambdaEnvironmentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccLambdaEnvironmentRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref AmccLambdaEnvironmentPolicy
+
+  AmccLambdaEnvironmentPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccLambdaEnvironmentPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "rds:DescribeDBInstances"
+              - "rds:DescribeDBClusters"
+              - "rds:AddTagsToResource"
+              - "rds:CreateDBInstance"
+              - "rds:DeleteDBInstance"
+              - "rds:CreateDBClusterEndpoint"
+            Resource:
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterName}"
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*"
+              - !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-endpoint:*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: 
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/LambdaEnvironmentFunction*"
+          - Effect: Allow
+            Action:
+              - "route53:ChangeResourceRecordSets"
+            Resource:
+              - !Sub "arn:aws:route53:::hostedzone/${PrivateHostedZone}"
+          - Effect: Allow
+            Action:
+              - "application-autoscaling:RegisterScalableTarget"
+              - "application-autoscaling:DeregisterScalableTarget"
+              - "application-autoscaling:PutScalingPolicy"
+              - "application-autoscaling:DescribeScalableTargets"
+              - "application-autoscaling:DescribeScalingActivities"
+              - "application-autoscaling:DescribeScalingPolicies"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:PutMetricAlarm"
+            Resource: "*"
+
+  ## Create Lambda Function for Create Custom Endpoints And Weight-based Record in Route 53
+  LambdaEnvironmentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaEnvironmentFunction
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt AmccLambdaEnvironmentRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import cfnresponse
+          import json
+
+          rds = boto3.client('rds')
+          route53 = boto3.client('route53')
+          application_autosclaing = boto3.client('application-autoscaling')
+          logs = boto3.client('logs')
+
+          CLUSTER_NAME = os.environ['CLUSTER_NAME']
+          SERVERLESS_INSTANCE_NAME = os.environ['SERVERLESS_INSTANCE_NAME']
+          HOSTED_ZONE_ID = os.environ['HOSTED_ZONE_ID']
+          TARGET_VALUE = float(os.environ['TARGET_VALUE'])
+          METRIC_NAMESPACE = os.environ['METRIC_NAMESPACE']
+
+          def lambda_handler(event, context):
+            if event['RequestType'] == 'Create':
+              # Custom AutoSclaing
+              # Register Scalable Target
+              application_autosclaing.register_scalable_target(
+                  ServiceNamespace='rds',
+                  ScalableDimension='rds:cluster:ReadReplicaCount',
+                  ResourceId=f'cluster:{CLUSTER_NAME}',
+                  MinCapacity=1,
+                  MaxCapacity=15
+              )
+              
+              # Get Metric Configuration
+              custom_metric_data = '''
+              {
+                  "TargetValue": %s,
+                  "CustomizedMetricSpecification": {
+                      "MetricName": "CPUUtilization",
+                      "Namespace": "%s",
+                      "Dimensions": [
+                          {
+                              "Name": "InstanceType",
+                              "Value": "provisioned"
+                          },
+                          {
+                              "Name": "ClusterName",
+                              "Value": "%s"
+                          }
+                      ],
+                      "Statistic": "Average",
+                      "Unit": "Percent"
+                  },
+                  "ScaleOutCooldown": 300,
+                  "ScaleInCooldown": 300,
+                  "DisableScaleIn": false
+              }    
+              ''' % (TARGET_VALUE, METRIC_NAMESPACE, CLUSTER_NAME)
+              
+              # Put Scaling Policy
+              application_autosclaing.put_scaling_policy(
+                  PolicyName='aurora_custom_scaling_policy',
+                  ServiceNamespace='rds',
+                  ResourceId=f'cluster:{CLUSTER_NAME}',
+                  ScalableDimension='rds:cluster:ReadReplicaCount',
+                  PolicyType='TargetTrackingScaling',
+                  TargetTrackingScalingPolicyConfiguration=json.loads(custom_metric_data)
+              )
+
+              ## Aurora Custom Endpoint
+              provisioned_ro_endpoint = rds.create_db_cluster_endpoint(
+                  DBClusterEndpointIdentifier='provisioned-ro',
+                  DBClusterIdentifier=CLUSTER_NAME,
+                  EndpointType='READER',
+                  ExcludedMembers=[SERVERLESS_INSTANCE_NAME]
+              )['Endpoint']
+
+              serverless_ro_endpoint = rds.create_db_cluster_endpoint(
+                  DBClusterEndpointIdentifier='serverless-ro',
+                  DBClusterIdentifier=CLUSTER_NAME,
+                  EndpointType='READER',
+                  StaticMembers=[SERVERLESS_INSTANCE_NAME]
+              )['Endpoint']
+
+              ## Route53 Weight Based Record
+              # Create Provisioned Read-Only weight-based Record
+              provisioned_ro_record = {
+                  'Changes': [
+                      {
+                          'Action': 'CREATE',
+                          'ResourceRecordSet': {
+                              'Name': 'read.amcc-rds.com',
+                              'Type': 'CNAME',
+                              'SetIdentifier': 'PROVISIONED_RO_RECORD_IDENTIFIER',
+                              'Weight': 10,
+                              'TTL': 0,
+                              'ResourceRecords': [
+                                  {
+                                      'Value': provisioned_ro_endpoint
+                                  }
+                              ]
+                          }
+                      }
+                  ]
+              }
+              route53.change_resource_record_sets(
+                  HostedZoneId=HOSTED_ZONE_ID,
+                  ChangeBatch=provisioned_ro_record
+              )
+
+              serverless_ro_record = {
+                  'Changes': [
+                      {
+                          'Action': 'CREATE',
+                          'ResourceRecordSet': {
+                              'Name': 'read.amcc-rds.com',
+                              'Type': 'CNAME',
+                              'SetIdentifier': 'SERVERLESS_RO_RECORD_IDENTIFIER',
+                              'Weight': 0,
+                              'TTL': 0,
+                              'ResourceRecords': [
+                                  {
+                                      'Value': serverless_ro_endpoint
+                                  }
+                              ]
+                          }
+                      }
+                  ]
+              }
+              route53.change_resource_record_sets(
+                  HostedZoneId=HOSTED_ZONE_ID,
+                  ChangeBatch=serverless_ro_record
+              )
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                  'ProvisionedReadEndpoint': provisioned_ro_endpoint,
+                  'ServerlessReadEndpoint': serverless_ro_endpoint
+              })
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ClusterName
+          SERVERLESS_INSTANCE_NAME: !Ref AuroraServerlessV2Instance
+          HOSTED_ZONE_ID: !Ref PrivateHostedZone
+          TARGET_VALUE: 40
+          METRIC_NAMESPACE: !Ref MetricNamespace
+    DependsOn:
+      - AuroraWriterInstance
+      - AuroraReaderInstance
+      - AuroraServerlessV2Instance
+      - PrivateHostedZone
+      - RDSOSMetricCollectorFunction
+
+  ## Invoke Custom Resource
+  LambdaEnvironmentFunctionResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LambdaEnvironmentFunction.Arn
+    DependsOn:
+      - AuroraWriterInstance
+      - AuroraReaderInstance
+      - AuroraServerlessV2Instance
+      - PrivateHostedZone
+      - RDSOSMetricCollectorFunction
+
+  ## Role for Lambda Function - IncreaseRoute53WeightsFunction/DecreaseRoute53WeightsFunction
+  AmccLambdaRoute53Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccLambdaRoute53Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref AmccLambdaRoute53Policy
+
+  AmccLambdaRoute53Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccLambdaRoute53Policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'route53:ListResourceRecordSets'
+              - 'route53:ChangeResourceRecordSets'
+            Resource:
+              - !Sub 'arn:aws:route53:::hostedzone/${PrivateHostedZone}'
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/IncreaseRoute53WeightsFunction*'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/DecreaseRoute53WeightsFunction*'
+    DependsOn: 
+      - LambdaEnvironmentFunctionResource
+  
+  ## IncreaseRoute53WeightsFunction Lambda Function 
+  IncreaseRoute53WeightsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: IncreaseRoute53Weights
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt AmccLambdaRoute53Role.Arn
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+
+          REGION_NAME = os.environ['REGION_NAME']
+          RECORD_NAME = os.environ['RECORD_NAME']
+          ZONE_NAME = os.environ['ZONE_NAME']+ '.'
+          SERVERLESS_IDENTIFIER = os.environ['SERVERLESS_IDENTIFIER']
+          SERVERLESS_RECORD = os.environ['SERVERLESS_RECORD']
+          HOSTED_ZONE_ID = os.environ['HOSTED_ZONE_ID']
+          MAX_WEIGHT = int(os.environ['MAX_WEIGHT'])
+          MIN_WEIGHT = int(os.environ['MIN_WEIGHT'])
+          STEP_SIZE = int(os.environ['STEP_SIZE'])
+          DNS_TTL = int(os.environ['DNS_TTL'])
+
+          session = boto3.Session(region_name=REGION_NAME)
+          route53 = session.client("route53")
+
+          def lambda_handler(event, context):
+              records = route53.list_resource_record_sets(HostedZoneId=HOSTED_ZONE_ID)["ResourceRecordSets"]
+
+              record_weight = {
+                  record["SetIdentifier"]: record["Weight"]
+                  for record in records
+                  if record["Name"] == RECORD_NAME + "." + ZONE_NAME
+              }
+
+              weight = min(record_weight.get(SERVERLESS_IDENTIFIER, 0) + STEP_SIZE, MAX_WEIGHT)
+
+              route53.change_resource_record_sets(
+                  HostedZoneId=HOSTED_ZONE_ID,
+                  ChangeBatch={
+                      "Changes": [
+                          {
+                              "Action": "UPSERT",
+                              "ResourceRecordSet": {
+                                  "Name": RECORD_NAME + "." + ZONE_NAME,
+                                  "Type": "CNAME",
+                                  "SetIdentifier": SERVERLESS_IDENTIFIER,
+                                  "Weight": weight,
+                                  "TTL": DNS_TTL,
+                                  "ResourceRecords": [{"Value": SERVERLESS_RECORD}],
+                              },
+                          }
+                      ]
+                  },
+              )
+
+              return {"reach_end": weight >= MAX_WEIGHT}
+      Environment:
+        Variables:
+          REGION_NAME: !Ref AWS::Region
+          RECORD_NAME: !Ref RecordName
+          ZONE_NAME: !Ref HostedZoneName
+          SERVERLESS_IDENTIFIER: 'SERVERLESS_RO_RECORD_IDENTIFIER'
+          SERVERLESS_RECORD: !GetAtt LambdaEnvironmentFunctionResource.ServerlessReadEndpoint
+          HOSTED_ZONE_ID: !Ref PrivateHostedZone
+          MAX_WEIGHT: !Ref MaxWeight
+          MIN_WEIGHT: !Ref MinWeight
+          STEP_SIZE: !Ref StepSize
+          DNS_TTL: !Ref DNSTtl
+    DependsOn:
+      - AuroraWriterInstance
+      - AuroraReaderInstance
+      - AuroraServerlessV2Instance
+      - PrivateHostedZone
+      - LambdaEnvironmentFunctionResource
+
+  ## DecreaseRoute53WeightsFunction Lambda Function 
+  DecreaseRoute53WeightsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DecreaseRoute53Weights
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt AmccLambdaRoute53Role.Arn
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+
+          REGION_NAME = os.environ['REGION_NAME']
+          RECORD_NAME = os.environ['RECORD_NAME']
+          ZONE_NAME = os.environ['ZONE_NAME']+ '.'
+          SERVERLESS_IDENTIFIER = os.environ['SERVERLESS_IDENTIFIER']
+          SERVERLESS_RECORD = os.environ['SERVERLESS_RECORD']
+          HOSTED_ZONE_ID = os.environ['HOSTED_ZONE_ID']
+          MAX_WEIGHT = int(os.environ['MAX_WEIGHT'])
+          MIN_WEIGHT = int(os.environ['MIN_WEIGHT'])
+          STEP_SIZE = int(os.environ['STEP_SIZE'])
+          DNS_TTL = int(os.environ['DNS_TTL'])
+
+          session = boto3.Session(region_name=REGION_NAME)
+          route53 = session.client("route53")
+
+          def lambda_handler(event, context):
+              records = route53.list_resource_record_sets(HostedZoneId=HOSTED_ZONE_ID)["ResourceRecordSets"]
+
+              record_weight = {
+                  record["SetIdentifier"]: record["Weight"]
+                  for record in records
+                  if record["Name"] == RECORD_NAME + "." + ZONE_NAME
+              }
+
+              weight = max(record_weight.get(SERVERLESS_IDENTIFIER, 0) - STEP_SIZE, MIN_WEIGHT)
+
+              route53.change_resource_record_sets(
+                  HostedZoneId=HOSTED_ZONE_ID,
+                  ChangeBatch={
+                      "Changes": [
+                          {
+                              "Action": "UPSERT",
+                              "ResourceRecordSet": {
+                                  "Name": RECORD_NAME + "." + ZONE_NAME,
+                                  "Type": "CNAME",
+                                  "SetIdentifier": SERVERLESS_IDENTIFIER,
+                                  "Weight": weight,
+                                  "TTL": DNS_TTL,
+                                  "ResourceRecords": [{"Value": SERVERLESS_RECORD}],
+                              },
+                          }
+                      ]
+                  },
+              )
+
+              return {"reach_end": weight <= MIN_WEIGHT}
+      Environment:
+        Variables:
+          REGION_NAME: !Ref AWS::Region
+          RECORD_NAME: !Ref RecordName
+          ZONE_NAME: !Ref HostedZoneName
+          SERVERLESS_IDENTIFIER: 'SERVERLESS_RO_RECORD_IDENTIFIER'
+          SERVERLESS_RECORD: !GetAtt LambdaEnvironmentFunctionResource.ServerlessReadEndpoint
+          HOSTED_ZONE_ID: !Ref PrivateHostedZone
+          MAX_WEIGHT: !Ref MaxWeight
+          MIN_WEIGHT: !Ref MinWeight
+          STEP_SIZE: !Ref StepSize
+          DNS_TTL: !Ref DNSTtl
+    DependsOn:
+      - AuroraWriterInstance
+      - AuroraReaderInstance
+      - AuroraServerlessV2Instance
+      - PrivateHostedZone
+      - LambdaEnvironmentFunctionResource
+
+  ## CloudWatch Alarm based on custom Metrics - High CPU / Threshold: 60 / Period: 10 Seconds
+  TrafficDistributionAlarms:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: traffic-distribution-alarm
+      AlarmDescription: CPU Utilization is greater than or equal to 60% - Traffic distribution triggers
+      MetricName: !Ref MetricName
+      Namespace: !Ref MetricNamespace
+      Statistic: Average
+      Period: 10
+      EvaluationPeriods: 1
+      Threshold: 60
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: !Ref MetricClusterKey
+          Value: !Ref ClusterName
+        - Name: !Ref MetricDimensionKey
+          Value: !Ref MetricDimensionValue
+    DependsOn:
+      - LambdaEnvironmentFunctionResource
+
+  ## CloudWatch Alarm based on custom Metrics - Low CPU / Threshold: 50 / Period: 10 Seconds
+  TrafficReclaimAlarms:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: traffic-reclaim-alarm
+      AlarmDescription: CPU Utilization is less than or equal to 50%
+      MetricName: !Ref MetricName
+      Namespace: !Ref MetricNamespace
+      Statistic: Average
+      Period: 10
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: !Ref MetricClusterKey
+          Value: !Ref ClusterName
+        - Name: !Ref MetricDimensionKey
+          Value: !Ref MetricDimensionValue
+    DependsOn:
+      - LambdaEnvironmentFunctionResource
+
+  ## Role for StepFunction
+  AmccStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccStepFunctionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref AmccStepFunctionPolicy
+
+  AmccStepFunctionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccStepFunctionPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'lambda:InvokeFunction'
+            Resource:
+              - !GetAtt IncreaseRoute53WeightsFunction.Arn
+              - !GetAtt DecreaseRoute53WeightsFunction.Arn
+          - Effect: Allow
+            Action:
+              - 'cloudwatch:DescribeAlarms'
+            Resource:
+              - !GetAtt TrafficDistributionAlarms.Arn
+              - !GetAtt TrafficReclaimAlarms.Arn
+
+  ## StepFunctions Using Lambda (IncreaseRoute53WeightsFunction) - When High CPU Alarms Occurs / Waiting Reflection 30 Seconds / 5 times
+  TrafficDistributionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: SF-TrafficDistribution
+      RoleArn: !GetAtt AmccStepFunctionRole.Arn      
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "High CPU Alarm",
+              "StartAt": "Update Weight",
+              "States": {
+                "Update Weight": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${IncreaseRoute53WeightsFunction.Arn}"
+                  },
+                  "Next": "Check"
+                },
+                "Check": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.Payload.reach_end",
+                      "BooleanEquals": true,
+                      "Next": "ending"
+                    }
+                  ],
+                  "Default": "Waiting Reflection"
+                },
+                "ending": {
+                  "Type": "Wait",
+                  "Seconds": 1,
+                  "End": true
+                },
+                "Waiting Reflection": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "DescribeAlarms"
+                },
+                "DescribeAlarms": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "AlarmNames": [
+                      "${TrafficDistributionAlarms}"
+                    ]
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:cloudwatch:describeAlarms",
+                  "Next": "Choice Alarm Status"
+                },
+                "Choice Alarm Status": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.MetricAlarms[0].StateValue",
+                      "StringEquals": "ALARM",
+                      "Next": "ALARM"
+                    }
+                  ],
+                  "Default": "OK"
+                },
+                "ALARM": {
+                  "Type": "Wait",
+                  "Seconds": 1,
+                  "Next": "Update Weight"
+                },
+                "OK": {
+                  "Type": "Wait",
+                  "Seconds": 1,
+                  "End": true
+                }
+              }
+            }
+          - IncreaseRoute53WeightsFunctionArn: !GetAtt IncreaseRoute53WeightsFunction.Arn
+            TrafficDistributionAlarms: !Ref TrafficDistributionAlarms
+    DependsOn:
+      - TrafficReclaimAlarms
+      - TrafficDistributionAlarms
+
+  ## StepFunctions Using Lambda (DecreaseRoute53WeightsFunction) - When Low CPU Alarms Occurs / Waiting Reflection 60 Seconds / 5 times
+  TrafficReclaimStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: SF-TrafficReclaim
+      RoleArn: !GetAtt AmccStepFunctionRole.Arn      
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Low CPU Alarm",
+              "StartAt": "Update Weight",
+              "States": {
+                "Update Weight": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${DecreaseRoute53WeightsFunction.Arn}"
+                  },
+                  "Next": "Check"
+                },
+                "Check": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.Payload.reach_end",
+                      "BooleanEquals": true,
+                      "Next": "ending"
+                    }
+                  ],
+                  "Default": "Waiting Reflection"
+                },
+                "ending": {
+                  "Type": "Wait",
+                  "Seconds": 1,
+                  "End": true
+                },
+                "Waiting Reflection": {
+                  "Type": "Wait",
+                  "Seconds": 60,
+                  "Next": "DescribeAlarms"
+                },
+                "DescribeAlarms": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "AlarmNames": [
+                      "${TrafficReclaimAlarms}"
+                    ]
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:cloudwatch:describeAlarms",
+                  "Next": "Choice Alarm Status"
+                },
+                "Choice Alarm Status": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.MetricAlarms[0].StateValue",
+                      "StringEquals": "ALARM",
+                      "Next": "ALARM"
+                    }
+                  ],
+                  "Default": "OK"
+                },
+                "ALARM": {
+                  "Type": "Wait",
+                  "Seconds": 10,
+                  "Next": "Update Weight"
+                },
+                "OK": {
+                  "Type": "Wait",
+                  "Seconds": 1,
+                  "End": true
+                }
+              }
+            }
+          - DecreaseRoute53WeightsFunctionArn: !GetAtt DecreaseRoute53WeightsFunction.Arn
+            TrafficReclaimAlarms: !Ref TrafficReclaimAlarms
+    DependsOn:
+      - TrafficReclaimAlarms
+      - TrafficDistributionAlarms
+
+  ## EventBridge Role
+  AmccEventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmccEventBridgeRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref AmccEventBridgePolicy
+
+  AmccEventBridgePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmccEventBridgePolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'states:StartExecution'
+            Resource:
+              - !Ref TrafficDistributionStateMachine
+              - !Ref TrafficReclaimStateMachine
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/events/*'
+
+  ## HighEventBridgeRule for invoke Stepfunctions when High CPU Alarms
+  HighEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: EventBridge-TrafficDistribution
+      EventPattern:
+        !Join
+          - ''
+          - - '{"source":["aws.cloudwatch"],"detail-type":["CloudWatch Alarm State Change"],"resources":["'
+            - !GetAtt TrafficDistributionAlarms.Arn
+            - '"],"detail":{"state":{"value":["ALARM"]}}}'              
+      State: ENABLED
+      Targets:
+        - Id: HighEventBridgeTarget
+          Arn: !Ref TrafficDistributionStateMachine
+          RoleArn: !GetAtt AmccEventBridgeRole.Arn
+    DependsOn:
+      - TrafficDistributionAlarms
+      - TrafficDistributionStateMachine
+
+  ## LowEventBridgeRule for invoke Stepfunctions when Low CPU Alarms
+  LowEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: EventBridge-TrafficReclaim
+      EventPattern:
+        !Join
+          - ''
+          - - '{"source":["aws.cloudwatch"],"detail-type":["CloudWatch Alarm State Change"],"resources":["'
+            - !GetAtt TrafficReclaimAlarms.Arn
+            - '"],"detail":{"state":{"value":["ALARM"]}}}'
+      State: ENABLED
+      Targets:
+        - Id: LowEventBridgeTarget
+          Arn: !Ref TrafficReclaimStateMachine
+          RoleArn: !GetAtt AmccEventBridgeRole.Arn
+    DependsOn:
+      - TrafficReclaimAlarms
+      - TrafficReclaimStateMachine
+
+  ## Control Lambda Function for Custom Auto Scaling to Aurora Cluster - Provisioned Only
+  ControlAuroraCustomScaling:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Control-AuroraCustomScaling
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt AmccLambdaEnvironmentRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import os
+          import boto3
+          import json
+          from botocore.exceptions import ClientError
+
+          application_autosclaing = boto3.client('application-autoscaling')
+          CLUSTER_NAME = os.environ['CLUSTER_NAME']
+          REGION_NAME = os.environ['REGION_NAME']
+          TARGET_VALUE = float(os.environ['TARGET_VALUE'])
+          METRIC_NAMESPACE = os.environ['METRIC_NAMESPACE']
+
+          def lambda_handler(event, context):
+              try:
+                  # Register Scalable Target
+                  print("Registering scalable target...")
+                  application_autosclaing.register_scalable_target(
+                      ServiceNamespace='rds',
+                      ScalableDimension='rds:cluster:ReadReplicaCount',
+                      ResourceId=f'cluster:{CLUSTER_NAME}',
+                      MinCapacity=1,
+                      MaxCapacity=15
+                  )
+                  print("Scalable target registered successfully.")
+
+                  # Get Metric Configuration
+                  custom_metric_data = '''
+                  {
+                    "TargetValue": %s,
+                    "CustomizedMetricSpecification": {
+                      "MetricName": "CPUUtilization",
+                      "Namespace": "%s",
+                      "Dimensions": [
+                        {
+                          "Name": "InstanceType",
+                          "Value": "provisioned"
+                        },
+                        {
+                            "Name": "ClusterName",
+                            "Value": "%s"
+                        }
+                      ],
+                      "Statistic": "Average",
+                      "Unit": "Percent"
+                    },
+                    "ScaleOutCooldown": 300,
+                    "ScaleInCooldown": 300,
+                    "DisableScaleIn": false
+                  }    
+                  ''' % (TARGET_VALUE, METRIC_NAMESPACE, CLUSTER_NAME)
+
+                  # Put Scaling Policy
+                  print("Putting scaling policy...")
+                  application_autosclaing.put_scaling_policy(
+                      PolicyName='aurora_custom_scaling_policy',
+                      ServiceNamespace='rds',
+                      ResourceId=f'cluster:{CLUSTER_NAME}',
+                      ScalableDimension='rds:cluster:ReadReplicaCount',
+                      PolicyType='TargetTrackingScaling',
+                      TargetTrackingScalingPolicyConfiguration=json.loads(custom_metric_data)
+                  )
+                  print("Scaling policy put successfully.")
+              except ClientError as e:
+                  print(f"Error: {e.response['Error']['Message']}")
+                  raise e
+              except Exception as e:
+                  print(f"Unexpected error: {e}")
+                  raise e
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ClusterName
+          REGION_NAME: !Ref AWS::Region
+          TARGET_VALUE: 40
+          METRIC_NAMESPACE: !Ref MetricNamespace
+    DependsOn:
+      - LambdaEnvironmentFunctionResource
+
+Outputs:
+  AmccS3BucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref AmccS3Bucket
+  VpcRegion:
+    Description: VPC Region
+    Value: !Ref AWS::Region
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+  VpcCidr:
+    Description: VPC CIDR
+    Value: !GetAtt VPC.CidrBlock
+  VpcName:
+    Description: VPC Name
+    Value: !Ref VpcName
+  ClusterName:
+    Description: The Aurora Cluster Identifier
+    Value: !Ref AuroraCluster
+  WriterInstanceName:
+    Description: The Aurora Writer Instance Identifier
+    Value: !Ref AuroraWriterInstance
+  ReaderInstanceName:
+    Description: The Aurora Reader Instance Identifier
+    Value: !Ref AuroraReaderInstance
+  ServerlessV2InstanceName:
+    Description: The Aurora Serverless V2 Instance Identifier
+    Value: !Ref AuroraServerlessV2Instance
+  HostedZoneId:
+    Description: The ID of the private hosted zone
+    Value: !Ref PrivateHostedZone
+  HostedZoneName:
+    Description: The name of the private hosted zone
+    Value: !Ref HostedZoneName
+  RDSOSMetricCollectorFunctionArn:
+    Description: The ARN of the Lambda function
+    Value: !GetAtt RDSOSMetricCollectorFunction.Arn
+  ProvisionedReadEndpoint:
+    Description: The address of the provisioned read endpoint
+    Value: !GetAtt LambdaEnvironmentFunctionResource.ProvisionedReadEndpoint
+  ServerlessReadEndpoint:
+    Description: The address of the serverless read endpoint
+    Value: !GetAtt LambdaEnvironmentFunctionResource.ServerlessReadEndpoint
+  IncreaseRoute53WeightsFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt IncreaseRoute53WeightsFunction.Arn
+  DecreaseRoute53WeightsFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt DecreaseRoute53WeightsFunction.Arn
+  MetricNamespace:
+    Description: Name of the Custom metric Namespace
+    Value: !Ref MetricNamespace
+  MetricName:
+    Description: Name of the Custom metric Name
+    Value: !Ref MetricName
+  MetricClusterKey:
+    Description: Name of the Custom metric ClusterKey
+    Value: !Ref MetricClusterKey
+  MetricDimensionKey:
+    Description: Name of the Custom metric DimensionKey
+    Value: !Ref MetricDimensionKey
+  MetricDimensionValue:
+    Description: Name of the Custom metric DimensionValue
+    Value: !Ref MetricDimensionValue
+  RecordName:
+    Description: sub Domain of the Route 53 private domain
+    Value: !Ref RecordName  
+  TrafficDistributionAlarmsName:
+    Description: Traffic Distribution Alarms Name
+    Value: !Ref TrafficDistributionAlarms
+  TrafficDistributionAlarmsArn:
+    Description: Traffic Distribution Alarms ARN
+    Value: !GetAtt TrafficDistributionAlarms.Arn
+  TrafficReclaimAlarmsName:
+    Description: Traffic Reclaim Alarms Name
+    Value: !Ref TrafficReclaimAlarms
+  TrafficReclaimAlarmsArn:
+    Description: Traffic Reclaim Alarms ARN
+    Value: !GetAtt TrafficReclaimAlarms.Arn
+  TrafficDistributionStateMachineArn:
+    Description: ARN of the Traffic-Distribution Step Functions State Machine
+    Value: !Ref TrafficDistributionStateMachine
+  TrafficReclaimStateMachineArn:
+    Description: ARN of the Traffic-Reclaim Step Functions State Machine
+    Value: !Ref TrafficReclaimStateMachine
+  HighEventBridgeRuleName:
+    Description: Name of the EventBridge rule for traffic distribution
+    Value: !Ref HighEventBridgeRule
+  LowEventBridgeRuleName:
+    Description: Name of the EventBridge rule for traffic reclaim
+    Value: !Ref LowEventBridgeRule
+  LambdaLayerArn:
+    Description: ARN of the Lambda layer for Embedded Metrics
+    Value: !Ref LambdaLayerEmbeddedMetrics
