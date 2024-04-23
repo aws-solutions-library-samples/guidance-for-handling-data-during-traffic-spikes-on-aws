@@ -799,7 +799,11 @@ Resources:
               - "cloudwatch:DescribeAlarms"
               - "cloudwatch:PutMetricAlarm"
             Resource: "*"
-
+          - Effect: Allow
+            Action:
+              - "iam:CreateServiceLinkedRole"
+            Resource: "*"
+            
   ## Create Lambda Function for Create Custom Endpoints And Weight-based Record in Route 53
   LambdaEnvironmentFunction:
     Type: AWS::Lambda::Function
