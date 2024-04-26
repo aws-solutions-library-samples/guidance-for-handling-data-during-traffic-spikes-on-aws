@@ -1,10 +1,11 @@
-# Guidance for Handling Sudden Traffic Spikes using Aurora mixed configuration architecture on AWS
+# Guidance for Handling Data during Traffic Spikes on AWS
 
 ## Table of Contents
 
 1. [Overview](#overview)
     - [Cost](#cost)
 2. [Prerequisites](#prerequisites)
+    - [Operating System](#operating-system)
 3. [Deployment Steps](#deployment-steps)
 4. [Deployment Validation](#deployment-validation)
 5. [Running the Guidance](#running-the-guidance)
@@ -98,11 +99,39 @@ The following table provides a sample cost breakdown for deploying this Guidance
 
 Note: **This amount is an estimate and does not include the cost of provisioned instances**. The actual cost may vary depending on your usage and provisioned services.
 
-## prerequisites
+## Prerequisites
+
+### Operating System
+
+These deployment instructions are optimized to best work on <Amazon Linux 2/Amazon Linux 2023 AMI>. Deployment in another OS may require additional steps.
 
 1. Ensure that `AWSCloudFormationStackSetAdministrationRole` role, and `AWSCloudFormationStackSetExecutionRole` role are created in the primary region where the Amazon Aurora database cluster resides. For more information, see [Grant self-managed permissions](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs-self-managed.html).
 
-2. Install and configure the latest version of the [AWS CLI (2.2.37 or newer)](https://aws.amazon.com/cli/) and Python 3.10 on the machine you are going to use to interact with the solution. This can be your personal laptop, an EC2 instance, Cloud9, or a similar machine. Set up the AWS credentials for the user who is authenticated to set up the stacks in the Primary region.
+2. Install and configure the latest version of the [AWS CLI (2.2.37 or newer)](https://aws.amazon.com/cli/) on the machine you are going to use to interact with the solution. This can be your personal laptop, an EC2 instance, Cloud9, or a similar machine. Set up the AWS credentials for the user who is authenticated to set up the stacks in the Primary region.
+
+    The following packages and modules are required:
+
+    - AWS CLI (version 2.2.37 or newer)
+    - jq
+
+    To install the required packages on Amazon Linux 2, run the following commands:
+
+    ```bash
+    # Update package lists
+    sudo yum update -y
+
+    # Install AWS CLI
+    sudo yum install -y awscli
+
+    # Install jq
+    sudo yum install -y jq
+    ```
+
+    After installing the required packages, you need to configure the AWS CLI with your AWS credentials. You can do this by running the following command and following the prompts:
+
+    ```
+    aws configure
+    ```
 
 ## Deployment Steps
 
@@ -110,8 +139,8 @@ Note: **This amount is an estimate and does not include the cost of provisioned 
 #### 1. Clone the repository
 
 ```
-git clone https://github.com/aws-solutions-library-samples/guidance-for-handling-sudden-traffic-spikes-in-amazon-aurora-using-aurora-mixed-configuration-on-aws
-cd ./guidance-for-handling-sudden-traffic-spikes-in-amazon-aurora-using-aurora-mixed-configuration-on-aws
+git clone https://github.com/aws-solutions-library-samples/guidance-for-handling-data-during-traffic-spikes-on-aws.git
+cd ./guidance-for-handling-data-during-traffic-spikes-on-aws
 ```
 
 #### 2. Create the AWS CloudFormation stacks in the Primary Region A
@@ -225,3 +254,7 @@ source ./deployment/clean.sh
 
 ## More information
 Related blog: [How ktown4u built a custom auto scaling architecture using an Amazon Aurora mixed-configuration cluster to respond to sudden traffic spikes](https://aws.amazon.com/ko/blogs/database/how-ktown4u-built-a-custom-auto-scaling-architecture-using-an-amazon-aurora-mixed-configuration-cluster-to-respond-to-sudden-traffic-spikes/)
+
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.
