@@ -248,9 +248,17 @@ Rather than providing step-by-step instructions, it is recommended to explore an
 ## Cleanup
 If you no longer need it, you can delete the AWS CloudFormation stack to clean up resources.
 
-```
-source ./deployment/clean.sh
-```
+* If you deployed using the CloudFormation console:
+
+    1. Delete the Auto Scaling Provisioned instances in Aurora Cluster created by the AWS Auto Scaling.
+    2. Delete the weight-based records in Route53 created by the CloudFormation stack.
+    3. Deleting the S3 bucket created by the CloudFormation stack
+    4. Now, You can delete the deployed CloudFormation stack. 
+
+* If you deployed using the provided script:
+    ```
+    source ./deployment/clean.sh
+    ```
 
 ## More information
 Related blog: [How ktown4u built a custom auto scaling architecture using an Amazon Aurora mixed-configuration cluster to respond to sudden traffic spikes](https://aws.amazon.com/ko/blogs/database/how-ktown4u-built-a-custom-auto-scaling-architecture-using-an-amazon-aurora-mixed-configuration-cluster-to-respond-to-sudden-traffic-spikes/)
