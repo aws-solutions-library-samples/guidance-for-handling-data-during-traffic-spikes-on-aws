@@ -62,40 +62,37 @@ For cost management, we recommend creating a budget through AWS Cost Explorer. P
 
 1. **AWS Lambda**
     - Memory allocation: 128MB
-    - Price: $0.0000002083 per 1 million requests (Seoul region)
-    <!-- - Monthly execution count if executed every second: 2,592,000 -->
-    <!-- - Monthly cost: 2,592,000 executions * $0.0000002083/1 million requests = $0.0054 -->
+    - Price: $0.20 per 1 million requests (Seoul region)
 
 2. **Amazon Aurora Serverless v2**
-    - ACU price: $0.015/hour for an average usage of 1 ACU (Seoul region)
-    - Price during spike periods with a maximum of 64 ACUs: approximately $0.96/hour (Seoul region)
-    <!-- - Monthly cost during normal periods: $0.015 * 720 hours = $10.8
-    - Monthly cost during spike periods: $0.96 * 24 hours * 4 weeks = $92.16 (assuming spike periods occur once a week for 24 hours) -->
+    - ACU price: $0.20/hour for an average usage of 1 ACU (Seoul region)
+    <!-- 
+    - Price during spike periods with a maximum of 64 ACUs: 0.20(1 ACU) * 64 = $12.8/hour (Seoul region)
+    - Monthly cost during normal periods: $0.2 * 730 hours = $146.00
+    - Monthly cost during spike periods: $12.8 * 96 (4days) = $1,228.8 (assuming spike periods occur once a week for 24 hours) 
+    -->
 
 3. **Amazon CloudWatch Logs**
-    - Price: $0.05/GB (Seoul region)
+    - Price: $1.53/GB (Seoul region)
     - Assumption: 1GB/month of log data generated
-    <!-- - Monthly cost: $0.05 -->
 
 4. **Amazon Route 53**
     - Weighted routing policy
-    - Price: $0.40 per 1 million queries (Seoul region)
-    <!-- - Assumption: Approximately 100 million queries/month
-    - Monthly cost: $40 -->
+    - Price: $0.90 per 1 million queries (Seoul region)
 
 **Total monthly estimated cost for all services**<br>
 The following table provides a sample cost breakdown for deploying this Guidance with the default parameters in the Asia Pacific (Seoul) Region for one month.
 
 | AWS service  | Dimensions | Cost [USD] |
 | ----------- | ------------ | ------------ |
-| AWS Lambda | Monthly 2,592,000 executions | $ 0.0054/month |
-| Amazon Aurora Serverless v2 | Monthly during normal periods: 720 hours (1 ACUs) | $ 146.0/month |
-| Amazon Aurora Serverless v2 | Monthly during spike periods: 96 hours (64 ACUs) | $ 19.2/month |
-| Amazon CloudWatch Logs | 1GB/month of log data generated | $ 0.05/month |
-| Amazon Route 53 | 1 million queries | $ 0.40/month |
-| Amazon Route 53 | 1 million queries | $ 0.40/month |
+| AWS Lambda | Monthly 2,592,000 executions | $1.60/month |
+| Amazon Aurora Serverless v2 | Monthly during normal periods: 730 hours (1 ACUs) | $146.0/month |
+| Amazon CloudWatch Logs | 1GB/month of log data generated | $1.53/month |
+| Amazon Route 53 | 1 million queries | $0.90/month |
 
-- Total: $ 146.0 + $19.2 + $0.05 + $0.40 = $ 165.65 / month
+<!--| Amazon Aurora Serverless v2 | Monthly during spike periods: 96 hours (64 ACUs) | $1,228.8/month |-->
+- Total: $1.60 + $146.0 + $1.53 + $0.90 = $150.03/month
+<!-- - Total: $1.60 + $146.0(normal) + $1,228.8(spike) + $1.53 + $0.90 = $1,378.83/month -->
 
 Note: **This amount is an estimate and does not include the cost of provisioned instances**. The actual cost may vary depending on your usage and provisioned services.
 
