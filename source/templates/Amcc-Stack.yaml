@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Amazon Aurora Mixed-Configuration Cluster with Custom Auto Scaling StackSet
+Description: Amazon Aurora Mixed-Configuration Cluster with Custom Auto Scaling StackSet (SO9441)
 
 Metadata:
   AWS::CloudFormation::Interface:
